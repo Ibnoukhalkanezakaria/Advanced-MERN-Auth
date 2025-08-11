@@ -1,9 +1,16 @@
 import { User } from "../models/userModel.js";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import { generateTokenAndSetCookie } from "../utils/generateTokenAndSetCookie.js";
-import { sendVerificationEmail, sendWelcomeEmail } from "../mailtrap/email.js";
+import {
+  sendPasswordResetEmail,
+  sendResetSuccessEmail,
+  sendVerificationEmail,
+  sendWelcomeEmail,
+} from "../mailtrap/email.js";
 
 export const sighup = async (req, res) => {
+  console.log("sighup baby");
   const { email, password, name } = req.body;
 
   try {
@@ -98,9 +105,152 @@ export const verifyEmail = async (req, res) => {
 };
 
 export const login = async (req, res) => {
-  res.send("Login route");
+  const { email, password } = req.body;
+
+  try {
+    // let's find a user
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid credentials",
+      });
+    }
+    // let's  check the password
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid Password" });
+    }
+    generateTokenAndSetCookie(res, user._id);
+
+    user.lastLogin = new Date();
+
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Logged in successfully",
+      user: {
+        ...user._doc,
+        password: undefined,
+      },
+    });
+  } catch (error) {
+    console.log("Error in login", error);
+    res.status(400).json({ success: false, message: error.message });
+  }
 };
 
 export const logout = async (req, res) => {
-  res.send("Logout route");
+  res.clearCookie("token");
+  res.status(200).json({ success: true, message: "Logged out successfully" });
+};
+
+export const forgotPassword = async (req, res) => {
+  const { email } = req.body;
+
+  try {
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res
+        .status(400)
+        .json({ success: false, message: "User not found" });
+    }
+
+    generateTokenAndSetCookie(res, user._id);
+
+    // generate reset token
+    const resetToken = crypto.randomBytes(32).toString("hex");
+
+    const resetTokenExpriesAt = Date.now() + 15 * 60 * 1000; // 15 minutes
+
+    // reset password token
+    user.resetPasswordToken = resetToken;
+    user.resetPasswordExpires = resetTokenExpriesAt;
+
+    // save the user in the database
+    await user.save();
+
+    // send password reset email
+    await sendPasswordResetEmail(
+      user.email,
+      `${process.env.APP_URL}/reset-password/${resetToken}`
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "Reset password email sent successfully",
+    });
+  } catch (error) {
+    console.log("Error in forgotPassword", error);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+export const resetPassword = async (req, res) => {
+  const { token } = req.params;
+  const { password } = req.body;
+
+  try {
+    // find the user with the reset token
+    const user = await User.findOne({
+      resetPasswordToken: token,
+      resetPasswordExpires: { $gt: Date.now() }, // check if the token is still valid
+    });
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired reset token",
+      });
+    }
+
+    // hash the new password
+    const hashedPassword = await bcrypt.hash(password, 10);
+    if (!hashedPassword) {
+      throw new Error("Failed to hash password");
+    }
+
+    // update the user's password and clear the reset token
+    user.password = hashedPassword;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    await user.save();
+
+    // send a success response
+    await sendResetSuccessEmail(user.email); // Assuming you have a function to send a reset success email
+
+    res.status(200).json({
+      success: true,
+      message: "Password reset successfully",
+      user: {
+        ...user._doc,
+        password: undefined, // don't send the password back
+      },
+    });
+  } catch (error) {
+    console.log("Error in resetPassword", error);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+export const checkAuth = async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).select("-password");
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+    ``;
+
+    res.status(200).json({ success: true, user });
+  } catch (error) {
+    console.log("Error in checkAuth", error);
+    res.status(500).json({ success: false, message: "Internal Server Error" });
+  }
 };
